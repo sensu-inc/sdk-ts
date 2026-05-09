@@ -1,0 +1,57 @@
+{
+  "name": "@sensu-ai/sdk",
+  "version": "0.6.1",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./integrations/anthropic": {
+      "import": "./dist/integrations/anthropic.js",
+      "types": "./dist/integrations/anthropic.d.ts"
+    },
+    "./integrations/langchain": {
+      "import": "./dist/integrations/langchain.js",
+      "types": "./dist/integrations/langchain.d.ts"
+    },
+    "./integrations/openai": {
+      "import": "./dist/integrations/openai.js",
+      "types": "./dist/integrations/openai.d.ts"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "prepublishOnly": "tsc"
+  },
+  "dependencies": {
+    "@sensu-ai/shared": "^0.6.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "*"
+  },
+  "peerDependencies": {
+    "@anthropic-ai/sdk": ">=0.20.0",
+    "langchain": ">=0.1.0",
+    "openai": ">=4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@anthropic-ai/sdk": {
+      "optional": true
+    },
+    "langchain": {
+      "optional": true
+    },
+    "openai": {
+      "optional": true
+    }
+  }
+}
