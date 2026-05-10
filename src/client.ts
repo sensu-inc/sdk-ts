@@ -15,6 +15,8 @@ import type {
   RawEmbeddingOptions,
   RecordFeedbackOptions,
   RecordEvalScoreOptions,
+  FeedbackOptions,
+  ScoreOptions,
   HandoffOptions,
   SpawnRunOptions,
   TrackGuardrailOptions,
@@ -707,6 +709,68 @@ export class SensuClient {
       // Re-queue on network error (best-effort)
       console.error('[sensu:sdk] flush network error:', err);
       this.buffer.unshift(...events);
+    }
+  }
+
+  /**
+   * Post end-user feedback for a run. Run-less helper — no active sensu.run() context required.
+   * Hits POST /api/v1/feedback directly (not the event buffer).
+   * Returns the created feedback id.
+   */
+  async feedback(opts: FeedbackOptions): Promise<{ id: string } | null> {
+    if (this.disabled || !this.apiKey) return null;
+    try {
+      const res = await fetch(`${this.baseUrl}/api/v1/feedback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': this.apiKey },
+        body: JSON.stringify({
+          runId:     opts.runId,
+          type:      opts.type,
+          score:     opts.score,
+          comment:   opts.comment,
+          endUserId: opts.endUserId,
+        }),
+      });
+      if (!res.ok) {
+        console.error(`[sensu:sdk] feedback failed ${res.status}: ${await res.text()}`);
+        return null;
+      }
+      return (await res.json()) as { id: string };
+    } catch (err) {
+      console.error('[sensu:sdk] feedback network error:', err);
+      return null;
+    }
+  }
+
+  /**
+   * Post an automated eval score for a run. Run-less helper.
+   * Hits POST /api/v1/eval-scores directly (not the event buffer).
+   * Returns the created eval score id.
+   */
+  async score(opts: ScoreOptions): Promise<{ id: string } | null> {
+    if (this.disabled || !this.apiKey) return null;
+    try {
+      const res = await fetch(`${this.baseUrl}/api/v1/eval-scores`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': this.apiKey },
+        body: JSON.stringify({
+          runId:            opts.runId,
+          metric:           opts.metric,
+          score:            opts.score,
+          evaluatorId:      opts.evaluatorId,
+          modelUsedForEval: opts.modelUsedForEval,
+          stepId:           opts.stepId,
+          llmCallId:        opts.llmCallId,
+        }),
+      });
+      if (!res.ok) {
+        console.error(`[sensu:sdk] score failed ${res.status}: ${await res.text()}`);
+        return null;
+      }
+      return (await res.json()) as { id: string };
+    } catch (err) {
+      console.error('[sensu:sdk] score network error:', err);
+      return null;
     }
   }
 

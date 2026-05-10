@@ -15,6 +15,8 @@ export type {
   RawEmbeddingOptions,
   RecordFeedbackOptions,
   RecordEvalScoreOptions,
+  FeedbackOptions,
+  ScoreOptions,
   SpawnRunOptions,
   HandoffOptions,
   TrackGuardrailOptions,

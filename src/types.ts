@@ -204,6 +204,18 @@ export interface RecordEvalScoreOptions {
   llmCallId?: string;
 }
 
+/** Options for the run-less, top-level `client.feedback()` helper. */
+export interface FeedbackOptions extends RecordFeedbackOptions {
+  /** The runId you want to attach this feedback to. Required because there's no active run handle. */
+  runId: string;
+}
+
+/** Options for the run-less, top-level `client.score()` helper. */
+export interface ScoreOptions extends RecordEvalScoreOptions {
+  /** The runId you want to attach this eval score to. Required because there's no active run handle. */
+  runId: string;
+}
+
 // ---------------------------------------------------------------------------
 // Multi-Agent
 // ---------------------------------------------------------------------------
