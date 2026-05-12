@@ -35,6 +35,18 @@ export interface SensuClientOptions {
    * Default: false
    */
   debugMode?: boolean;
+  /**
+   * When true, message bodies attached to `messagesSnapshot` are forwarded to
+   * the API on each LLM call. The API runs them through its shared PII
+   * pipeline at ingest, stores the masked form for display, and keeps the
+   * raw bodies tenant-side for the Replay scrubber's audited unmask flow.
+   *
+   * Default: false. Bodies are NEVER sent unless this flag is explicitly
+   * enabled — back-compat + privacy posture.
+   *
+   * See planning/REPLAY_V1_PLAN.md §7 for the storage + retention contract.
+   */
+  captureMessageBodies?: boolean;
 }
 
 /** Alias for StartRunOptions — used with the sensu.run() high-level API. */
@@ -67,6 +79,14 @@ export interface MessageSnapshotItem {
   tool_name?: string;
   token_count: number;
   content_hash: string;
+  /**
+   * Optional raw message body. Only forwarded to the API when the client
+   * was constructed with `captureMessageBodies: true`. The API masks PII
+   * via its shared pipeline at ingest; the masked form is what every
+   * non-unmask consumer reads. Max 65,536 chars (longer bodies are
+   * silently dropped to match the server-side schema cap).
+   */
+  body?: string;
 }
 
 export interface TrackLlmOptions {

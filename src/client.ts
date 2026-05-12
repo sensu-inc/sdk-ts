@@ -26,7 +26,13 @@ import type {
   StartSessionOptions,
   ResumeSessionOptions,
   RetrievalChunkInput,
+  MessageSnapshotItem,
 } from './types.js';
+
+// Server-side enforces the same cap via z.string().max(65536) on
+// MessageSnapshotItemSchema. Trim eagerly so a single oversized message
+// doesn't reject the whole batch.
+const MAX_BODY_CHARS = 65_536;
 
 // ---------------------------------------------------------------------------
 // StepHandle — fluent API for a single step
@@ -143,7 +149,9 @@ export class StepHandle {
       status,
       ...usage,
       ...(contextBreakdown ? { context_breakdown: contextBreakdown } : {}),
-      ...(opts.messagesSnapshot?.length ? { messages_snapshot: opts.messagesSnapshot } : {}),
+      ...(opts.messagesSnapshot?.length
+        ? { messages_snapshot: this.client.sanitizeMessagesSnapshot(opts.messagesSnapshot) }
+        : {}),
       ...(opts.referencedChunkIds?.length ? { referenced_chunk_ids: opts.referencedChunkIds } : {}),
     });
 
@@ -607,6 +615,11 @@ export class SensuClient {
   readonly disabled: boolean;
   private readonly disableLivePricing: boolean;
   private readonly debugMode: boolean;
+  // When false (default), the SDK strips `body` from every message
+  // snapshot before flushing — protects the wire from accidental PII
+  // leakage from callers that pre-fill bodies without thinking about
+  // capture posture. See REPLAY_V1_PLAN.md §7.
+  readonly captureMessageBodies: boolean;
   private readonly onLoopDetected?: (toolName: string, callCount: number) => void;
   private readonly loopThreshold: number;
   // runId → toolName → call count within that run
@@ -643,6 +656,7 @@ export class SensuClient {
     this.disabled = opts.disabled ?? false;
     this.disableLivePricing = opts.disableLivePricing ?? false;
     this.debugMode = opts.debugMode ?? false;
+    this.captureMessageBodies = opts.captureMessageBodies ?? false;
     this.onLoopDetected = opts.onLoopDetected;
     this.loopThreshold = opts.loopThreshold ?? 5;
     this.runStorage = new AsyncLocalStorage<RunHandle>();
@@ -667,6 +681,27 @@ export class SensuClient {
     if (this.buffer.length >= this.batchSize) {
       void this.flush();
     }
+  }
+
+  /**
+   * Strip `body` from each message snapshot unless the client was
+   * constructed with `captureMessageBodies: true`. Also caps body length
+   * at 65,536 chars to match the server schema.
+   *
+   * Called from trackLlm() before the snapshot hits the wire — keeps the
+   * decision in one place so future producers (e.g. a streaming version
+   * that accepts mid-stream snapshots) can use the same sanitizer.
+   */
+  sanitizeMessagesSnapshot(input: MessageSnapshotItem[]): MessageSnapshotItem[] {
+    if (!this.captureMessageBodies) {
+      return input.map(({ body: _omit, ...rest }) => rest);
+    }
+    return input.map((m) => {
+      if (m.body && m.body.length > MAX_BODY_CHARS) {
+        return { ...m, body: m.body.slice(0, MAX_BODY_CHARS) };
+      }
+      return m;
+    });
   }
 
   /** Flush all buffered events to the Sensu API */
