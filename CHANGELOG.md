@@ -1,5 +1,41 @@
 # `@sensu-ai/sdk` changelog
 
+## 0.8.0 — 2026-05-13
+
+### Added — per-call tool I/O body capture
+
+- **`TrackToolOptions.args?: unknown`** — new optional field on the
+  step-level `step.trackTool({ … })` call. JSON-serialized into
+  `input_body` on `tool.call.completed` when `captureBodies: true`.
+- **`TrackToolOptions.captureBodies?: boolean`** — default `false`.
+  When `true`, the call's `args` and the awaited result of `fn` are
+  JSON-stringified and shipped on `tool.call.completed` as
+  `input_body` + `output_body`. The Sensu API runs its shared PII
+  pipeline at ingest, masks both into `_masked` columns, and surfaces
+  the raw bodies only via the audited Replay unmask flow.
+  Per-call opt-in (not per-client) so storage and PII exposure are
+  explicit decisions. See `planning/TOOL_IO_CAPTURE_PLAN.md §5.1` in
+  the platform repo.
+- **Top-level `SensuClient.trackTool(toolName, fn, opts)`** — the
+  convenience helper now forwards `args` + `captureBodies` from its
+  `opts` argument to the underlying `step.trackTool` call. No
+  positional signature change.
+- **256 KB per-field cap** with the cross-SDK `' …[truncated]'` marker
+  on overflow. Cross-SDK invariant: when serialization fails for
+  either side (circular structure, BigInt, function-valued result,
+  bare `undefined`) BOTH body fields are skipped — never half-captured.
+
+### Changed
+
+- No breaking changes. Default `captureBodies` is `false`, so existing
+  `trackTool` calls continue to emit the v1 metadata-only
+  `tool.call.completed` event.
+
+### Semver notes
+
+Pre-1.0 minor bump. **Fully backward compatible.** Opting in requires
+passing `captureBodies: true` per call.
+
 ## 0.7.0 — 2026-05-11
 
 ### Added — opt-in message-body capture for Replay v1

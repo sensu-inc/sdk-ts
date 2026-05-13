@@ -34,6 +34,65 @@ import type {
 // doesn't reject the whole batch.
 const MAX_BODY_CHARS = 65_536;
 
+// Tool I/O body capture (TOOL_IO_CAPTURE_PLAN.md §5.1 + §11.3). 256 KB
+// per field — wider than the LLM message cap because real tool outputs
+// (JSON manifests, HTML excerpts) routinely run past 64 KB. Server
+// enforces the same cap defensively via z.string().max(262144) on the
+// tool.call.completed schema.
+const MAX_TOOL_BODY_CHARS = 262_144;
+
+// Cross-SDK truncation marker (TOOL_IO_CAPTURE_PLAN.md §5.4). The
+// leading space is intentional — let it land on a word boundary so the
+// inspector renders cleanly inline. Final body length stays at exactly
+// MAX_TOOL_BODY_CHARS when truncation triggers.
+const TRUNCATION_MARKER = ' …[truncated]';
+
+/**
+ * Serialize a tool call's input args + result for transport when the
+ * caller opted in via `captureBodies: true`. Returns an object that
+ * spreads cleanly into the `tool.call.completed` event payload:
+ *
+ *   - opt-out (default): empty object, neither body field emitted.
+ *   - opt-in + both sides serialize: `{ input_body, output_body }`
+ *     each ≤ 256 KB.
+ *   - opt-in + either side fails (circular structure, BigInt, etc.)
+ *     OR JSON.stringify returns undefined (e.g., a bare `undefined`
+ *     args or result, a function-only result): empty object. We skip
+ *     BOTH bodies rather than half-capturing so the server-side
+ *     "snapshotMissing" affordance stays coherent
+ *     (TOOL_IO_CAPTURE_PLAN.md §11.4).
+ *
+ * Exported for unit-testing the serialization rules without standing
+ * up a full client + run + step + fetch mock.
+ */
+export function serializeToolBodiesForCapture(
+  args: unknown,
+  result: unknown,
+  captureBodies: boolean | undefined,
+): { input_body?: string; output_body?: string } {
+  if (!captureBodies) return {};
+  let inputBody: string | undefined;
+  let outputBody: string | undefined;
+  try {
+    inputBody  = JSON.stringify(args);
+    outputBody = JSON.stringify(result);
+  } catch {
+    return {};
+  }
+  // JSON.stringify returns undefined for `undefined`, functions, and
+  // symbols. Treat as a serialization failure — skip both fields.
+  if (typeof inputBody !== 'string' || typeof outputBody !== 'string') return {};
+  return {
+    input_body:  truncateToolBodyForTransport(inputBody),
+    output_body: truncateToolBodyForTransport(outputBody),
+  };
+}
+
+function truncateToolBodyForTransport(s: string): string {
+  if (s.length <= MAX_TOOL_BODY_CHARS) return s;
+  return s.slice(0, MAX_TOOL_BODY_CHARS - TRUNCATION_MARKER.length) + TRUNCATION_MARKER;
+}
+
 // ---------------------------------------------------------------------------
 // StepHandle — fluent API for a single step
 // ---------------------------------------------------------------------------
@@ -276,6 +335,7 @@ export class StepHandle {
 
     const latencyMs = Date.now() - startMs;
     const outputSize = estimateBytes(result);
+    const bodyFields = serializeToolBodiesForCapture(opts.args, result, opts.captureBodies);
 
     this.client.enqueue({
       ...this.base(),
@@ -286,6 +346,7 @@ export class StepHandle {
       output_size_bytes: outputSize,
       tool_call_id: toolCallId,
       retry_of: opts.retryOf,
+      ...bodyFields,
     });
 
     this.client.notifyToolCall(this.runId, opts.toolName);
@@ -870,14 +931,30 @@ export class SensuClient {
   /**
    * Track a tool call inside the active sensu.run() context.
    * Graceful no-op (executes fn without tracking) if called outside sensu.run().
+   *
+   * Pass `args` + `captureBodies: true` to ship the tool's input args
+   * and result on `tool.call.completed` for replay/debugging. Server
+   * runs the PII pipeline at ingest — raw bodies stay inside the
+   * audited unmask flow. Default is opt-out per call so storage and
+   * PII exposure are explicit decisions (TOOL_IO_CAPTURE_PLAN.md §11.2).
    */
-  async trackTool<T>(toolName: string, fn: () => Promise<T>, opts?: { retryOf?: string }): Promise<T> {
+  async trackTool<T>(
+    toolName: string,
+    fn: () => Promise<T>,
+    opts?: { retryOf?: string; args?: unknown; captureBodies?: boolean },
+  ): Promise<T> {
     const run = this.getActiveRun();
     if (!run) return fn();
 
     const step = run.startStep({ name: toolName, stepType: 'tool' });
     try {
-      return await step.trackTool({ toolName, fn, retryOf: opts?.retryOf }) as T;
+      return await step.trackTool({
+        toolName,
+        fn,
+        retryOf:       opts?.retryOf,
+        args:          opts?.args,
+        captureBodies: opts?.captureBodies,
+      }) as T;
     } finally {
       await step.end();
     }
