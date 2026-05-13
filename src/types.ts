@@ -135,6 +135,29 @@ export interface TrackToolOptions {
   fn: () => Promise<unknown>;
   /** ID of the original failed tool call this is retrying, for chain visualization */
   retryOf?: string;
+  /**
+   * Tool-call input arguments. When `captureBodies` is true these are
+   * JSON-stringified and shipped on `tool.call.completed` as
+   * `input_body`; the awaited result of `fn` becomes `output_body`.
+   * Server runs the PII pipeline on each at ingest, so raw bodies
+   * never leave the tenant boundary unmasked. Default behavior (no
+   * `captureBodies` flag) keeps the v1 shape — neither body field is
+   * emitted.
+   */
+  args?: unknown;
+  /**
+   * When true, the call's input args and resolved result are
+   * JSON-stringified and shipped on `tool.call.completed`. Server
+   * runs the PII pipeline at ingest, masks both into `_masked`
+   * columns, and surfaces the raw bodies only via the audited
+   * unmask flow. Default: false (matches v1).
+   *
+   * Serialization is best-effort: if `JSON.stringify` fails for
+   * either side (circular structure, BigInt, etc.) both fields
+   * are skipped so the inspector's "not captured" affordance
+   * stays coherent (no half-captured state).
+   */
+  captureBodies?: boolean;
 }
 
 export interface RawLlmCallOptions {
