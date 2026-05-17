@@ -1,6 +1,6 @@
 {
   "name": "@sensu-ai/sdk",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -37,6 +37,7 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@langchain/core": "^0.3.80",
     "@types/node": "^20.0.0",
     "typescript": "*",
     "vitest": "^2.1.4"

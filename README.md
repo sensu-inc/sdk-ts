@@ -187,12 +187,58 @@ const response = await openai.chat.completions.create({ model: 'gpt-4o', ... });
 
 ### LangChain
 
-```ts
-import { SensuCallbackHandler } from '@sensu-ai/sdk/integrations/langchain';
+Drop the Sensu callback handler into any LangChain chain, agent, or LLM.
+Chain boundaries, LLM calls (with streaming TTFT and retry/fallback detection),
+and tool calls are captured automatically.
 
-const handler = new SensuCallbackHandler({ client: sensu, runHandle: run });
-const chain = new LLMChain({ llm, prompt, callbacks: [handler] });
+```ts
+import { SensuClient } from '@sensu-ai/sdk';
+import { SensuCallbackHandler } from '@sensu-ai/sdk/integrations/langchain';
+import { ChatAnthropic } from '@langchain/anthropic';
+import { ChatPromptTemplate } from '@langchain/core/prompts';
+
+const sensu = new SensuClient({
+  apiKey: process.env.SENSU_API_KEY,
+  agentId: 'my-langchain-agent',
+});
+
+const handler = new SensuCallbackHandler({ client: sensu });
+
+const prompt = ChatPromptTemplate.fromMessages([['human', '{question}']]);
+const llm = new ChatAnthropic({ model: 'claude-sonnet-4-6' });
+const chain = prompt.pipe(llm);
+
+const result = await chain.invoke(
+  { question: 'What is observability?' },
+  { callbacks: [handler] },
+);
 ```
+
+**Tying events to a specific run.** By default the handler creates its own
+`sessionId`/`runId` UUIDs. Pass them explicitly to correlate LangChain
+telemetry with a run started elsewhere:
+
+```ts
+const run = sensu.startRun({ sessionId: 'user-session-1' });
+const handler = new SensuCallbackHandler({
+  client: sensu,
+  sessionId: 'user-session-1',
+  runId: run.runId,
+});
+```
+
+**What's captured.** Chain start/end → `agent.step.*`; LLM start/end/error →
+`llm.request.*` (provider, model, tokens, latency, TTFT); streaming tokens →
+`stream.token.received` every 10th token; tool start/end/error → `tool.call.*`
+with `retry_of` when the same tool re-invokes after error, and `is_fallback`
+on the next LLM after an error.
+
+**Limitations.** LangChain's callback interface exposes aggregate token counts
+only — per-role context breakdown is not surfaced through this path. For
+context-window analysis, use the low-level `trackLlm()` / `recordLlm()` APIs
+directly.
+
+Requires `langchain >= 0.1.0` (declared as an optional peer dependency).
 
 ## Supported models (cost estimation)
 

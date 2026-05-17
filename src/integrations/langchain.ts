@@ -1,18 +1,28 @@
 /**
  * LangChain callback handler for Sensu telemetry.
  *
- * STATUS: Work in Progress — not ready for use.
- * This file exists as a development preview. It is not exported from the package
- * root and has not been tested end-to-end. Do not use in production.
- * Revisit after Live Pricing Feature Phase 4 is complete.
+ * Drop into any LangChain chain, agent, or LLM via the `callbacks` array
+ * to capture LLM calls, tool calls, streaming TTFT, retry/fallback chains,
+ * and chain step boundaries automatically.
  *
- * Planned usage (once released):
+ * Usage:
+ *   import { SensuClient } from '@sensu-ai/sdk';
  *   import { SensuCallbackHandler } from '@sensu-ai/sdk/integrations/langchain';
+ *
+ *   const sensu = new SensuClient({ apiKey: '...', agentId: 'my-agent' });
  *   const handler = new SensuCallbackHandler({ client: sensu });
- *   const chain = new LLMChain({ ..., callbacks: [handler] });
+ *
+ *   const chain = new LLMChain({ llm, prompt, callbacks: [handler] });
+ *   await chain.invoke({ input }, { callbacks: [handler] });
+ *
+ * Requires `langchain` as a peer dependency (>=0.1.0). Install separately:
+ *   npm install langchain
  */
 
 import { randomUUID } from 'crypto';
+import { BaseCallbackHandler } from '@langchain/core/callbacks/base';
+import type { Serialized } from '@langchain/core/load/serializable';
+import type { LLMResult } from '@langchain/core/outputs';
 import type { SensuClient } from '../client.js';
 
 interface LangChainCallbackHandlerOptions {
@@ -21,17 +31,11 @@ interface LangChainCallbackHandlerOptions {
   runId?: string;
 }
 
-interface LangChainLlmStartInput {
-  name?: string;
-  [key: string]: unknown;
-}
+export class SensuCallbackHandler extends BaseCallbackHandler {
+  // Required by BaseCallbackHandler — surfaced in LangChain debug output.
+  name = 'sensu_callback_handler';
+  awaitHandlers = true;
 
-interface LangChainLlmEndOutput {
-  generations?: Array<Array<{ text?: string; generationInfo?: Record<string, unknown> }>>;
-  llmOutput?: Record<string, unknown>;
-}
-
-export class SensuCallbackHandler {
   private readonly client: SensuClient;
   private readonly sessionId: string;
   private runId: string;
@@ -43,6 +47,9 @@ export class SensuCallbackHandler {
   private firstTokenTimes: Map<string, number> = new Map();
   private streamTokenCounts: Map<string, number> = new Map();
   private llmCallIds: Map<string, string> = new Map();
+  // Carry model + provider from start to end so completion events aren't 'unknown'
+  private llmModels: Map<string, string> = new Map();
+  private llmProviders: Map<string, string> = new Map();
   private static readonly STREAM_EMIT_EVERY = 10;
   // Retry + fallback tracking
   private toolCallIds: Map<string, string> = new Map();        // runId → toolCallId
@@ -52,10 +59,24 @@ export class SensuCallbackHandler {
   private lastLlmErrored = false;
 
   constructor(opts: LangChainCallbackHandlerOptions) {
+    super();
     this.client = opts.client;
     this.sessionId = opts.sessionId ?? randomUUID();
     this.runId = opts.runId ?? randomUUID();
     this.traceId = randomUUID();
+  }
+
+  /**
+   * Required by LangChain's runtime check (`isBaseCallbackHandler`). Returns
+   * a handler that emits to the same SensuClient, so a cloned chain context
+   * shares the run identity.
+   */
+  copy(): SensuCallbackHandler {
+    return new SensuCallbackHandler({
+      client: this.client,
+      sessionId: this.sessionId,
+      runId: this.runId,
+    });
   }
 
   private base(spanId?: string) {
@@ -72,7 +93,7 @@ export class SensuCallbackHandler {
   }
 
   // Called when a chain starts
-  async handleChainStart(_chain: unknown, _inputs: unknown, runId: string) {
+  async handleChainStart(_chain: Serialized, _inputs: Record<string, unknown>, runId: string) {
     const stepId = randomUUID();
     this.stepIds.set(runId, stepId);
     this.client.enqueue({
@@ -85,7 +106,7 @@ export class SensuCallbackHandler {
   }
 
   // Called when a chain ends
-  async handleChainEnd(_outputs: unknown, runId: string) {
+  async handleChainEnd(_outputs: Record<string, unknown>, runId: string) {
     const stepId = this.stepIds.get(runId);
     this.client.enqueue({
       ...this.base(),
@@ -97,7 +118,7 @@ export class SensuCallbackHandler {
 
   // Called when an LLM starts
   async handleLLMStart(
-    llm: LangChainLlmStartInput,
+    llm: Serialized,
     _prompts: string[],
     runId: string,
   ) {
@@ -110,18 +131,25 @@ export class SensuCallbackHandler {
     const isFallback = this.lastLlmErrored;
     this.lastLlmErrored = false;
 
-    const provider = inferProvider(llm.name ?? '');
+    // Serialized.id is the class path, e.g. ['langchain_core', 'language_models', 'chat_models', 'ChatAnthropic'].
+    // The last element is the most specific class name. Fall back to `name` then 'unknown'.
+    const idTail = Array.isArray(llm.id) ? llm.id[llm.id.length - 1] : undefined;
+    const model = idTail ?? llm.name ?? 'unknown';
+    const provider = inferProvider(model);
+    this.llmModels.set(runId, model);
+    this.llmProviders.set(runId, provider);
+
     this.client.enqueue({
       ...this.base(),
       event_type: 'llm.request.started',
       provider,
-      model: llm.name ?? 'unknown',
+      model,
       is_fallback: isFallback || undefined,
     });
   }
 
   // Called for each streaming token (LangChain v0.2+)
-  async handleLLMNewToken(_token: string, _idx: unknown, runId: string) {
+  async handleLLMNewToken(_token: string, _idx: { prompt: number; completion: number } | undefined, runId: string) {
     const now = Date.now();
     if (!this.firstTokenTimes.has(runId)) {
       this.firstTokenTimes.set(runId, now);
@@ -145,28 +173,36 @@ export class SensuCallbackHandler {
   }
 
   // Called when an LLM ends
-  async handleLLMEnd(output: LangChainLlmEndOutput, runId: string) {
+  async handleLLMEnd(output: LLMResult, runId: string) {
     const startMs = this.startTimes.get(runId);
     const latencyMs = startMs ? Date.now() - startMs : undefined;
     const firstTokenMs = this.firstTokenTimes.get(runId);
     const ttftMs = startMs && firstTokenMs ? firstTokenMs - startMs : undefined;
     const isStreamed = this.streamTokenCounts.has(runId);
+
+    // Prefer the model name resolved at generation time (more specific than
+    // the LangChain class name we captured at start), fall back to start.
+    const endModel = output.generations?.[0]?.[0]?.generationInfo?.['model'] as string | undefined;
+    const model = endModel ?? this.llmModels.get(runId) ?? 'unknown';
+    const provider = inferProvider(endModel ?? '') !== 'langchain'
+      ? inferProvider(endModel ?? '')
+      : this.llmProviders.get(runId) ?? 'langchain';
+
     this.startTimes.delete(runId);
     this.firstTokenTimes.delete(runId);
     this.streamTokenCounts.delete(runId);
     this.llmCallIds.delete(runId);
+    this.llmModels.delete(runId);
+    this.llmProviders.delete(runId);
 
     // Extract token usage from llmOutput if available
     const usage = output.llmOutput?.['tokenUsage'] as Record<string, number> | undefined;
-    const provider = inferProvider(
-      (output.generations?.[0]?.[0]?.generationInfo?.['model'] as string | undefined) ?? '',
-    );
 
     this.client.enqueue({
       ...this.base(),
       event_type: 'llm.request.completed',
       provider,
-      model: 'unknown',
+      model,
       latency_ms: latencyMs,
       ttft_ms: ttftMs,
       streamed: isStreamed,
@@ -178,28 +214,34 @@ export class SensuCallbackHandler {
   }
 
   // Called when an LLM errors
-  async handleLLMError(_err: Error, runId: string) {
+  async handleLLMError(_err: unknown, runId: string) {
     const startMs = this.startTimes.get(runId);
     const latencyMs = startMs ? Date.now() - startMs : undefined;
+    const model = this.llmModels.get(runId) ?? 'unknown';
+    const provider = this.llmProviders.get(runId) ?? 'langchain';
+
     this.startTimes.delete(runId);
     this.firstTokenTimes.delete(runId);
     this.streamTokenCounts.delete(runId);
     this.llmCallIds.delete(runId);
+    this.llmModels.delete(runId);
+    this.llmProviders.delete(runId);
     this.lastLlmErrored = true;
 
     this.client.enqueue({
       ...this.base(),
       event_type: 'llm.request.completed',
-      provider: 'langchain',
-      model: 'unknown',
+      provider,
+      model,
       latency_ms: latencyMs,
       status: 'error',
     });
   }
 
   // Called when a tool starts
-  async handleToolStart(tool: unknown, _input: string, runId: string) {
-    const toolName = (tool as { name?: string })?.name ?? 'unknown';
+  async handleToolStart(tool: Serialized, _input: string, runId: string) {
+    const idTail = Array.isArray(tool.id) ? tool.id[tool.id.length - 1] : undefined;
+    const toolName = (tool as Serialized & { name?: string }).name ?? idTail ?? 'unknown';
     const toolCallId = randomUUID();
 
     this.toolStartTimes.set(runId, Date.now());
@@ -242,7 +284,7 @@ export class SensuCallbackHandler {
   }
 
   // Called when a tool errors
-  async handleToolError(_err: Error, runId: string) {
+  async handleToolError(_err: unknown, runId: string) {
     const startMs = this.toolStartTimes.get(runId);
     const latencyMs = startMs ? Date.now() - startMs : undefined;
     const toolCallId = this.toolCallIds.get(runId);
