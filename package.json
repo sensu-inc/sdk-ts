@@ -1,6 +1,6 @@
 {
   "name": "@sensu-ai/sdk",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -16,6 +16,10 @@
     "./integrations/langchain": {
       "import": "./dist/integrations/langchain.js",
       "types": "./dist/integrations/langchain.d.ts"
+    },
+    "./integrations/langgraph": {
+      "import": "./dist/integrations/langgraph.js",
+      "types": "./dist/integrations/langgraph.d.ts"
     },
     "./integrations/openai": {
       "import": "./dist/integrations/openai.js",
@@ -44,11 +48,15 @@
   },
   "peerDependencies": {
     "@anthropic-ai/sdk": ">=0.20.0",
+    "@langchain/langgraph": ">=0.2.0",
     "langchain": ">=0.1.0",
     "openai": ">=4.0.0"
   },
   "peerDependenciesMeta": {
     "@anthropic-ai/sdk": {
+      "optional": true
+    },
+    "@langchain/langgraph": {
       "optional": true
     },
     "langchain": {

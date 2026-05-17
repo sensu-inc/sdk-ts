@@ -43,6 +43,11 @@ export class SensuCallbackHandler extends BaseCallbackHandler {
   private startTimes: Map<string, number> = new Map();
   private toolStartTimes: Map<string, number> = new Map();
   private stepIds: Map<string, string> = new Map();
+  // Chain starts we deliberately skipped (e.g. LangGraph internal
+  // channel-write wrappers tagged `langsmith:hidden`). Their matching
+  // handleChainEnd should also be a no-op rather than emitting a
+  // dangling agent.step.completed with no step_id.
+  private skippedRunIds: Set<string> = new Set();
   // Streaming: track first-token time and token counts per LLM run
   private firstTokenTimes: Map<string, number> = new Map();
   private streamTokenCounts: Map<string, number> = new Map();
@@ -92,21 +97,54 @@ export class SensuCallbackHandler extends BaseCallbackHandler {
     };
   }
 
-  // Called when a chain starts
-  async handleChainStart(_chain: Serialized, _inputs: Record<string, unknown>, runId: string) {
+  // Called when a chain starts. Accepts the full LangChain signature so the
+  // optional `tags` and `metadata` args are available — LangGraph emits
+  // `langgraph_node` in metadata when a graph node fires, and tags
+  // internal channel-write wrappers with `langsmith:hidden`.
+  async handleChainStart(
+    _chain: Serialized,
+    _inputs: Record<string, unknown>,
+    runId: string,
+    _parentRunId?: string,
+    tags?: string[],
+    metadata?: Record<string, unknown>,
+  ) {
+    // LangGraph node detection — populated only when running inside a graph.
+    const langGraphNode = metadata?.['langgraph_node'] as string | undefined;
+    const langGraphStep = metadata?.['langgraph_step'] as number | undefined;
+    const isHidden = Array.isArray(tags) && tags.includes('langsmith:hidden');
+
+    // LangGraph nests each node execution inside one or more channel-write
+    // wrappers that share the `langgraph_node` metadata but are tagged
+    // hidden. Emitting them as separate steps would 3-5x the event count
+    // with no user-facing meaning. Skip them — but remember the runId so
+    // the matching handleChainEnd is also a no-op.
+    if (isHidden && langGraphNode) {
+      this.skippedRunIds.add(runId);
+      return;
+    }
+
     const stepId = randomUUID();
     this.stepIds.set(runId, stepId);
+
     this.client.enqueue({
       ...this.base(randomUUID()),
       step_id: stepId,
       event_type: 'agent.step.started',
-      step_type: 'chain',
+      step_type: langGraphNode ? 'langgraph_node' : 'chain',
       sequence: 0,
+      ...(langGraphNode ? { node_name: langGraphNode } : {}),
+      ...(langGraphNode && langGraphStep !== undefined ? { langgraph_step: langGraphStep } : {}),
     });
   }
 
   // Called when a chain ends
   async handleChainEnd(_outputs: Record<string, unknown>, runId: string) {
+    if (this.skippedRunIds.delete(runId)) {
+      // Start was skipped; skip the end too rather than emit a dangling
+      // agent.step.completed with no step_id.
+      return;
+    }
     const stepId = this.stepIds.get(runId);
     this.client.enqueue({
       ...this.base(),

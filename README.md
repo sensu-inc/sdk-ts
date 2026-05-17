@@ -240,6 +240,53 @@ directly.
 
 Requires `langchain >= 0.1.0` (declared as an optional peer dependency).
 
+### LangGraph
+
+Building agentic workflows with [LangGraph](https://langchain-ai.github.io/langgraphjs/)?
+Use `SensuLangGraphHandler` to get per-node steps in the Sensu trace tree.
+Each node execution emits an `agent.step.started` event with
+`step_type='langgraph_node'` and the node name; LangGraph's internal
+`ChannelWrite` plumbing wrappers (tagged `langsmith:hidden`) are filtered
+out so the event stream stays clean.
+
+```ts
+import { SensuClient } from '@sensu-ai/sdk';
+import { SensuLangGraphHandler } from '@sensu-ai/sdk/integrations/langgraph';
+import { StateGraph, Annotation, START, END } from '@langchain/langgraph';
+
+const sensu = new SensuClient({ apiKey: process.env.SENSU_API_KEY, agentId: 'my-graph' });
+const handler = new SensuLangGraphHandler({ client: sensu });
+
+const State = Annotation.Root({
+  topic:   Annotation<string>(),
+  outline: Annotation<string>(),
+});
+
+const graph = new StateGraph(State)
+  .addNode('plan_step', async (s) => ({ outline: `outline for: ${s.topic}` }))
+  .addEdge(START, 'plan_step')
+  .addEdge('plan_step', END)
+  .compile();
+
+const result = await graph.invoke(
+  { topic: 'observability' },
+  { callbacks: [handler] },
+);
+```
+
+**What's added beyond the LangChain handler.** A node execution emits
+`step_type='langgraph_node'` (vs `'chain'`), with extra fields:
+
+- `node_name` — the `addNode()` name (e.g. `"plan_step"`)
+- `langgraph_step` — LangGraph's monotonic step counter
+
+Everything else — LLM calls, tool calls, streaming TTFT, retry/fallback —
+works identically to the LangChain integration, because `SensuLangGraphHandler`
+subclasses `SensuCallbackHandler`. Mixed LangChain + LangGraph projects work
+with either handler; the parent class auto-detects LangGraph nodes too.
+
+Requires `@langchain/langgraph >= 0.2.0` (declared as an optional peer dependency).
+
 ## Supported models (cost estimation)
 
 The SDK automatically estimates cost for the following models:
