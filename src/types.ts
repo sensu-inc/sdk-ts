@@ -260,6 +260,37 @@ export interface ScoreOptions extends RecordEvalScoreOptions {
 }
 
 // ---------------------------------------------------------------------------
+// Eval-gated CI/CD (§5.2) — agent versions registry
+// ---------------------------------------------------------------------------
+
+/**
+ * Candidate config registered under an agent version. Mirrors the API's
+ * CandidateConfig shape — the system prompt is required, the model is
+ * optional (defaults to the sampled run's source model at gate time).
+ */
+export interface CandidateConfig {
+  systemPrompt: string;
+  model?:       string;
+}
+
+export interface RegisterAgentVersionOptions {
+  /** Customer-facing agent name (the SDK prepends orgId server-side). */
+  agentId: string;
+  /** Opaque identifier — usually a git commit SHA. Used as a human label. */
+  sha:     string;
+  /** The candidate config (system prompt + optional model) for this version. */
+  config:  CandidateConfig;
+}
+
+export interface AgentVersion {
+  id:        string;
+  agentId:   string;
+  sha:       string;
+  config:    CandidateConfig;
+  createdAt: string;
+}
+
+// ---------------------------------------------------------------------------
 // Multi-Agent
 // ---------------------------------------------------------------------------
 
