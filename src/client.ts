@@ -27,6 +27,8 @@ import type {
   ResumeSessionOptions,
   RetrievalChunkInput,
   MessageSnapshotItem,
+  RegisterAgentVersionOptions,
+  AgentVersion,
 } from './types.js';
 
 // Server-side enforces the same cap via z.string().max(65536) on
@@ -866,6 +868,37 @@ export class SensuClient {
       return (await res.json()) as { id: string };
     } catch (err) {
       console.error('[sensu:sdk] score network error:', err);
+      return null;
+    }
+  }
+
+  /**
+   * Register a candidate config (system prompt + optional model) used for a
+   * given commit so eval-gate checks (§5.2) can reference it as `versionId`
+   * instead of inlining the full config every request. Run-less helper.
+   * Hits POST /api/v1/agents/:id/versions directly.
+   *
+   * Customers typically call this from their deploy step, then pass the
+   * returned `id` to the Sensu eval-gate Action.
+   */
+  async registerAgentVersion(opts: RegisterAgentVersionOptions): Promise<AgentVersion | null> {
+    if (this.disabled || !this.apiKey) return null;
+    try {
+      const res = await fetch(
+        `${this.baseUrl}/api/v1/agents/${encodeURIComponent(opts.agentId)}/versions`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-API-Key': this.apiKey },
+          body: JSON.stringify({ sha: opts.sha, config: opts.config }),
+        },
+      );
+      if (!res.ok) {
+        console.error(`[sensu:sdk] registerAgentVersion failed ${res.status}: ${await res.text()}`);
+        return null;
+      }
+      return (await res.json()) as AgentVersion;
+    } catch (err) {
+      console.error('[sensu:sdk] registerAgentVersion network error:', err);
       return null;
     }
   }

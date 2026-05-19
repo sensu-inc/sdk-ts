@@ -25,4 +25,7 @@ export type {
   DeployPromptVersionOptions,
   StartSessionOptions,
   ResumeSessionOptions,
+  CandidateConfig,
+  RegisterAgentVersionOptions,
+  AgentVersion,
 } from './types.js';
