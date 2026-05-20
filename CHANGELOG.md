@@ -1,5 +1,43 @@
 # `@sensu-ai/sdk` changelog
 
+## 0.12.0 — 2026-05-19
+
+### Changed — pricing fallback removed; live API is the only path
+
+The SDK no longer ships a bundled `MODEL_PRICING` table. `resolvePricing`
+calls the platform endpoint `GET /api/v1/pricing/models/:p/:m` and
+caches the result for the session lifetime. On failure (API unreachable,
+4xx/5xx, `disableLivePricing: true`, client `disabled`, missing API
+key) it returns `[0, 0]` and warns at most once per `(provider, model)`
+per client lifetime.
+
+**Why:** the bundled table drifted from the platform catalog and
+required a manual sync step on every release. With this change the
+platform is the single source of truth — including for custom models
+customers register via the new `POST /api/v1/pricing/org-models`
+endpoint. The server's ingest pipeline reconciles cost from `llm_calls`
++ the catalog regardless of what the SDK sent, so cost dashboards stay
+correct even when an SDK call returns 0.
+
+**Breaking-ish:** prior versions returned a (potentially stale)
+fallback price on API failure. This version returns 0 + warns. If you
+relied on the fallback for an air-gapped environment, please open an
+issue — we can revisit. See
+[`SDK_CONSOLIDATION_PLAN.md`](https://github.com/sensu-inc/sensu/blob/main/planning/SDK_CONSOLIDATION_PLAN.md)
+§3c for the design rationale.
+
+**Removed:**
+- The exported-internal `MODEL_PRICING` map (was never part of the
+  public API surface but worth noting for anyone who reached into the
+  module).
+- The synchronous `estimateCost()` helper. `extractUsage()` no longer
+  sets `cost_usd_estimate` synchronously; the async override in
+  `trackLlm` (`resolvePricing` → assign) is the only source.
+
+**Type changes:**
+- `SensuClientOptions.disableLivePricing` JSDoc updated — now
+  effectively a debug toggle since the fallback is gone.
+
 ## 0.11.0 — 2026-05-19
 
 ### Added — agent version registry for eval-gated CI/CD (§5.2)
