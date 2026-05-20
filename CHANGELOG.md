@@ -1,5 +1,31 @@
 # `@sensu-ai/sdk` changelog
 
+## 0.12.1 — 2026-05-20
+
+### Added — pricing cache TTL
+
+New `pricingCacheTtlMs` option on `SensuClientOptions`. Default **1
+hour** (3,600,000 ms). After expiry the next `resolvePricing()` call
+refetches from the live API and replaces the cached entry. Set `0`
+to disable caching entirely (every tracked LLM call fetches pricing
+fresh).
+
+**Why:** before this release the per-`(provider, model)` cache had
+no TTL and lived for the client lifetime. Long-running services
+operated on pricing snapshotted at boot, which became misleading
+when customers updated per-org pricing
+([`POST /api/v1/pricing/org-models`](https://github.com/sensu-inc/sensu/blob/main/planning/%5BDONE%5D_SDK_CONSOLIDATION_PLAN.md))
+mid-process or when global catalog rates changed. This was open
+v1.1 follow-on #1 in `[DONE]_SDK_CONSOLIDATION_PLAN.md` §9 —
+closed now.
+
+5 new tests covering: TTL expiry triggers refetch, rates update
+across the expiry boundary, default 1-hour behavior, `TTL=0`
+disables caching, TTL applies per-`(provider, model)` independently.
+Full suite green: 71/71.
+
+Patch bump: 0.12.0 → 0.12.1.
+
 ## 0.12.0 — 2026-05-19
 
 ### Changed — pricing fallback removed; live API is the only path
