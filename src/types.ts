@@ -23,8 +23,16 @@ export interface SensuClientOptions {
    */
   loopThreshold?: number;
   /**
-   * When true, the SDK will not attempt to fetch live pricing from the API.
-   * Cost estimates will use the bundled MODEL_PRICING table only.
+   * When true, the SDK will not attempt to fetch live pricing from the
+   * API. Cost estimates for tracked LLM calls will be 0 (the server-side
+   * ingest pipeline still reconciles cost from llm_calls + the catalog
+   * at query time, so dashboards stay correct).
+   *
+   * Pricing fallback tables were removed in v0.12.0 — customers are
+   * assumed online; this flag is now primarily a debug toggle. To
+   * register custom-model pricing (e.g. tuned/private models), use the
+   * platform endpoint POST /api/v1/pricing/org-models.
+   *
    * Default: false
    */
   disableLivePricing?: boolean;

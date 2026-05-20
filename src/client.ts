@@ -1229,35 +1229,65 @@ export class SensuClient {
 
   /**
    * Resolve per-1M-token pricing for a model.
-   * Fetches from the Sensu API on first use and caches for the session lifetime.
-   * Falls back to the bundled MODEL_PRICING table if the API is unreachable or the
-   * model is unknown, and to a near-zero sentinel if it's missing from both.
+   *
+   * Always hits the Sensu API on first use; caches the result for the
+   * session lifetime (per provider+model). Cost estimates are an online
+   * concern — no bundled fallback table ships in this SDK
+   * (see SDK_CONSOLIDATION_PLAN.md §3c in the platform repo).
+   *
+   * On failure (API unreachable, model not in any cascade tier,
+   * `disableLivePricing: true`, client `disabled`, or no API key):
+   * returns `[0, 0]` so the call's cost estimate becomes 0. Warns at
+   * most once per (provider, model) per client lifetime so logs don't
+   * spam. The server's ingest pipeline reconciles cost at query time
+   * from `llm_calls` + the catalog regardless of what the SDK sent.
    */
   async resolvePricing(provider: string, model: string): Promise<[number, number]> {
-    if (this.disableLivePricing || this.disabled || !this.apiKey) {
-      return MODEL_PRICING[model] ?? [0.001, 0.002];
-    }
     const key = `${provider}:${model}`;
-    if (!this.pricingCache.has(key)) {
-      try {
-        const res = await fetch(
-          `${this.baseUrl}/api/v1/pricing/models/${encodeURIComponent(provider)}/${encodeURIComponent(model)}`,
-          { headers: { 'X-API-Key': this.apiKey } },
-        );
-        if (res.ok) {
-          const data = (await res.json()) as {
-            inputPricePer1mTokens?: number | null;
-            outputPricePer1mTokens?: number | null;
-          };
-          if (data.inputPricePer1mTokens != null && data.outputPricePer1mTokens != null) {
-            this.pricingCache.set(key, [data.inputPricePer1mTokens, data.outputPricePer1mTokens]);
-          }
-        }
-      } catch {
-        // Network error — fall through to local fallback
-      }
+
+    if (this.disableLivePricing || this.disabled || !this.apiKey) {
+      this.warnPricingMissOnce(key, this.disableLivePricing
+        ? 'disableLivePricing=true'
+        : this.disabled ? 'client disabled' : 'no API key');
+      return [0, 0];
     }
-    return this.pricingCache.get(key) ?? MODEL_PRICING[model] ?? [0.001, 0.002];
+
+    const cached = this.pricingCache.get(key);
+    if (cached) return cached;
+
+    try {
+      const res = await fetch(
+        `${this.baseUrl}/api/v1/pricing/models/${encodeURIComponent(provider)}/${encodeURIComponent(model)}`,
+        { headers: { 'X-API-Key': this.apiKey } },
+      );
+      if (res.ok) {
+        const data = (await res.json()) as {
+          inputPricePer1mTokens?: number | null;
+          outputPricePer1mTokens?: number | null;
+        };
+        if (data.inputPricePer1mTokens != null && data.outputPricePer1mTokens != null) {
+          const pair: [number, number] = [data.inputPricePer1mTokens, data.outputPricePer1mTokens];
+          this.pricingCache.set(key, pair);
+          return pair;
+        }
+      }
+      this.warnPricingMissOnce(key, `API returned ${res.status}`);
+    } catch (err) {
+      this.warnPricingMissOnce(key, `network error: ${(err as Error).message}`);
+    }
+    return [0, 0];
+  }
+
+  private readonly warnedPricingMisses = new Set<string>();
+
+  private warnPricingMissOnce(key: string, reason: string): void {
+    if (this.warnedPricingMisses.has(key)) return;
+    this.warnedPricingMisses.add(key);
+    console.warn(
+      `[sensu:sdk] live pricing unavailable for ${key} (${reason}); ` +
+      `cost estimates for this model will be 0 until the API call succeeds. ` +
+      `If this is a custom model, register it via POST /api/v1/pricing/org-models.`,
+    );
   }
 
   destroy(): void {
@@ -1273,27 +1303,13 @@ export class SensuClient {
 // Helpers
 // ---------------------------------------------------------------------------
 
-// Pricing per 1M tokens [input, output] in USD
-const MODEL_PRICING: Record<string, [number, number]> = {
-  'claude-opus-4-6':             [15.00, 75.00],
-  'claude-sonnet-4-6':           [ 3.00, 15.00],
-  'claude-haiku-4-5-20251001':   [ 0.80,  4.00],
-  'claude-3-5-sonnet-20241022':  [ 3.00, 15.00],
-  'claude-3-5-haiku-20241022':   [ 0.80,  4.00],
-  'claude-3-opus-20240229':      [15.00, 75.00],
-  'gpt-4o':                      [ 2.50, 10.00],
-  'gpt-4o-mini':                 [ 0.15,  0.60],
-  'gpt-4-turbo':                 [10.00, 30.00],
-};
+// SDK_CONSOLIDATION_PLAN.md §3c — bundled pricing fallback removed.
+// `extractUsage` no longer sets `cost_usd_estimate` synchronously; the
+// async override in `trackLlm` calls `resolvePricing()` (live API) and
+// sets it after the fact. Server-side ingest reconciles cost from
+// `llm_calls` + the catalog as the source of truth.
 
-function estimateCost(model: string, inputTokens: number, outputTokens: number): number {
-  const pricing = MODEL_PRICING[model];
-  if (!pricing) return 0;
-  const [inputPrice, outputPrice] = pricing;
-  return (inputTokens / 1_000_000) * inputPrice + (outputTokens / 1_000_000) * outputPrice;
-}
-
-function extractUsage(result: unknown, model: string): Record<string, number | undefined> {
+function extractUsage(result: unknown, _model: string): Record<string, number | undefined> {
   if (!result || typeof result !== 'object') return {};
   const r = result as Record<string, unknown>;
 
@@ -1307,7 +1323,8 @@ function extractUsage(result: unknown, model: string): Record<string, number | u
       output_tokens: outputTokens,
       cached_input_tokens: num(u['cache_read_input_tokens']),
       total_tokens: inputTokens + outputTokens,
-      cost_usd_estimate: estimateCost(model, inputTokens, outputTokens),
+      // cost_usd_estimate intentionally omitted — set later by trackLlm's
+      // async resolvePricing() override; server reconciles regardless.
     };
   }
 
@@ -1320,7 +1337,7 @@ function extractUsage(result: unknown, model: string): Record<string, number | u
       input_tokens: inputTokens,
       output_tokens: outputTokens,
       total_tokens: num(u['total_tokens']),
-      cost_usd_estimate: estimateCost(model, inputTokens, outputTokens),
+      // cost_usd_estimate intentionally omitted — see Anthropic branch.
     };
   }
 
