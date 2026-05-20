@@ -37,6 +37,22 @@ export interface SensuClientOptions {
    */
   disableLivePricing?: boolean;
   /**
+   * How long the SDK should cache resolved per-(provider, model) pricing
+   * before refetching from the Sensu API. After expiry the next
+   * resolvePricing() call hits the live endpoint and replaces the cached
+   * entry. Set 0 to disable caching entirely (every tracked LLM call
+   * fetches pricing fresh — useful if you change per-org pricing
+   * frequently and need immediate visibility).
+   *
+   * Long-running services should keep this short enough that pricing
+   * changes propagate within the freshness window your dashboards
+   * depend on. Short-lived processes (CLI, Lambda) effectively get
+   * fresh pricing per invocation regardless.
+   *
+   * Default: 3600000 (1 hour)
+   */
+  pricingCacheTtlMs?: number;
+  /**
    * When true, print a one-line summary of each event to the console before flushing.
    * Useful during development to verify the integration is working without opening the dashboard.
    * Events are still sent to the API — this flag observes only, never suppresses.

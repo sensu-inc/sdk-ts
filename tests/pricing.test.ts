@@ -10,7 +10,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SensuClient } from '../src/index.js';
 
-function makeClient(overrides: Partial<{ apiKey: string; disabled: boolean; disableLivePricing: boolean }> = {}): SensuClient {
+function makeClient(overrides: Partial<{
+  apiKey: string;
+  disabled: boolean;
+  disableLivePricing: boolean;
+  pricingCacheTtlMs: number;
+}> = {}): SensuClient {
   return new SensuClient({
     apiKey:           overrides.apiKey ?? 'test-key',
     baseUrl:          'http://localhost:9999',
@@ -20,6 +25,7 @@ function makeClient(overrides: Partial<{ apiKey: string; disabled: boolean; disa
     flushIntervalMs:  999_999,
     disabled:         overrides.disabled ?? false,
     disableLivePricing: overrides.disableLivePricing ?? false,
+    ...(overrides.pricingCacheTtlMs !== undefined ? { pricingCacheTtlMs: overrides.pricingCacheTtlMs } : {}),
   });
 }
 
@@ -155,5 +161,128 @@ describe('SensuClient.resolvePricing — short-circuit paths', () => {
     expect(fetchMock).not.toHaveBeenCalled();
     expect(warnSpy).toHaveBeenCalledTimes(1);
     expect(warnSpy.mock.calls[0]![0]).toMatch(/no API key/);
+  });
+});
+
+describe('SensuClient.resolvePricing — cache TTL', () => {
+  function mockFetchReturning(input: number, output: number): { fetchMock: ReturnType<typeof vi.fn>; calls: () => number } {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      inputPricePer1mTokens: input,
+      outputPricePer1mTokens: output,
+    }), { status: 200 }));
+    // @ts-expect-error — overriding global fetch
+    globalThis.fetch = fetchMock;
+    return { fetchMock, calls: () => fetchMock.mock.calls.length };
+  }
+
+  it('refetches after the TTL expires', async () => {
+    vi.useFakeTimers();
+    try {
+      const { calls } = mockFetchReturning(15, 75);
+      const client = makeClient({ pricingCacheTtlMs: 60_000 }); // 1 minute TTL
+
+      const first = await client.resolvePricing('anthropic', 'claude-opus-4-7');
+      expect(first).toEqual([15, 75]);
+      expect(calls()).toBe(1);
+
+      // Advance just under the TTL — still cache hit.
+      vi.advanceTimersByTime(59_000);
+      await client.resolvePricing('anthropic', 'claude-opus-4-7');
+      expect(calls()).toBe(1);
+
+      // Cross the TTL threshold — next call refetches.
+      vi.advanceTimersByTime(2_000);
+      await client.resolvePricing('anthropic', 'claude-opus-4-7');
+      expect(calls()).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('picks up updated rates on the refetch', async () => {
+    vi.useFakeTimers();
+    try {
+      // First mock returns one rate set.
+      let mock1 = vi.fn(async () => new Response(JSON.stringify({
+        inputPricePer1mTokens: 15, outputPricePer1mTokens: 75,
+      }), { status: 200 }));
+      // @ts-expect-error
+      globalThis.fetch = mock1;
+
+      const client = makeClient({ pricingCacheTtlMs: 1_000 });
+      const before = await client.resolvePricing('anthropic', 'claude-opus-4-7');
+      expect(before).toEqual([15, 75]);
+
+      // Swap fetch mock — second call returns a different (e.g. discounted) rate.
+      const mock2 = vi.fn(async () => new Response(JSON.stringify({
+        inputPricePer1mTokens: 12, outputPricePer1mTokens: 60,
+      }), { status: 200 }));
+      // @ts-expect-error
+      globalThis.fetch = mock2;
+      void mock1; // suppress unused
+
+      // Advance past TTL → next call refetches → gets new rate.
+      vi.advanceTimersByTime(1_500);
+      const after = await client.resolvePricing('anthropic', 'claude-opus-4-7');
+      expect(after).toEqual([12, 60]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('default TTL is 1 hour (cache holds across multiple in-window calls)', async () => {
+    vi.useFakeTimers();
+    try {
+      const { calls } = mockFetchReturning(15, 75);
+      const client = makeClient(); // no TTL override
+
+      await client.resolvePricing('anthropic', 'claude-opus-4-7');
+      vi.advanceTimersByTime(45 * 60 * 1000); // 45 min — within default 1h
+      await client.resolvePricing('anthropic', 'claude-opus-4-7');
+      expect(calls()).toBe(1);
+
+      vi.advanceTimersByTime(20 * 60 * 1000); // total 65 min — past 1h
+      await client.resolvePricing('anthropic', 'claude-opus-4-7');
+      expect(calls()).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('TTL=0 disables caching (every call hits the API)', async () => {
+    const { calls } = mockFetchReturning(15, 75);
+    const client = makeClient({ pricingCacheTtlMs: 0 });
+
+    for (let i = 0; i < 5; i++) {
+      await client.resolvePricing('anthropic', 'claude-opus-4-7');
+    }
+    expect(calls()).toBe(5);
+  });
+
+  it('TTL applies per (provider, model) pair independently', async () => {
+    vi.useFakeTimers();
+    try {
+      const { calls } = mockFetchReturning(15, 75);
+      const client = makeClient({ pricingCacheTtlMs: 60_000 });
+
+      await client.resolvePricing('anthropic', 'claude-opus-4-7');
+      // Different pair — cache miss regardless of TTL.
+      await client.resolvePricing('openai', 'gpt-4o');
+      expect(calls()).toBe(2);
+
+      // Within TTL — both hit the cache.
+      vi.advanceTimersByTime(30_000);
+      await client.resolvePricing('anthropic', 'claude-opus-4-7');
+      await client.resolvePricing('openai', 'gpt-4o');
+      expect(calls()).toBe(2);
+
+      // Past TTL — both refetch.
+      vi.advanceTimersByTime(60_000);
+      await client.resolvePricing('anthropic', 'claude-opus-4-7');
+      await client.resolvePricing('openai', 'gpt-4o');
+      expect(calls()).toBe(4);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

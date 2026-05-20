@@ -687,8 +687,10 @@ export class SensuClient {
   private readonly loopThreshold: number;
   // runId → toolName → call count within that run
   private readonly runToolCallCounts = new Map<string, Map<string, number>>();
-  // provider:model → [inputPricePer1M, outputPricePer1M]
-  private readonly pricingCache = new Map<string, [number, number]>();
+  // provider:model → { rates, fetchedAt }. Entries older than
+  // pricingCacheTtlMs are treated as cache misses on read.
+  private readonly pricingCache = new Map<string, { value: [number, number]; fetchedAt: number }>();
+  private readonly pricingCacheTtlMs: number;
   // Async context storage for concurrent-safe run propagation (Node.js only)
   private readonly runStorage: AsyncLocalStorage<RunHandle>;
 
@@ -718,6 +720,8 @@ export class SensuClient {
     this.flushIntervalMs = opts.flushIntervalMs ?? 2000;
     this.disabled = opts.disabled ?? false;
     this.disableLivePricing = opts.disableLivePricing ?? false;
+    // Default 1 hour. Set 0 to disable caching (every call hits the API).
+    this.pricingCacheTtlMs = opts.pricingCacheTtlMs ?? 3_600_000;
     this.debugMode = opts.debugMode ?? false;
     this.captureMessageBodies = opts.captureMessageBodies ?? false;
     this.onLoopDetected = opts.onLoopDetected;
@@ -1230,9 +1234,13 @@ export class SensuClient {
   /**
    * Resolve per-1M-token pricing for a model.
    *
-   * Always hits the Sensu API on first use; caches the result for the
-   * session lifetime (per provider+model). Cost estimates are an online
-   * concern — no bundled fallback table ships in this SDK
+   * Hits the Sensu API on first use and caches the result for
+   * `pricingCacheTtlMs` (default 1 hour). After expiry, the next call
+   * refetches — keeps long-running services from operating on
+   * pricing snapshotted at boot. Set `pricingCacheTtlMs: 0` to
+   * disable caching (every call hits the API).
+   *
+   * No bundled fallback table ships in this SDK
    * (see SDK_CONSOLIDATION_PLAN.md §3c in the platform repo).
    *
    * On failure (API unreachable, model not in any cascade tier,
@@ -1253,7 +1261,9 @@ export class SensuClient {
     }
 
     const cached = this.pricingCache.get(key);
-    if (cached) return cached;
+    if (cached && (Date.now() - cached.fetchedAt) < this.pricingCacheTtlMs) {
+      return cached.value;
+    }
 
     try {
       const res = await fetch(
@@ -1267,7 +1277,7 @@ export class SensuClient {
         };
         if (data.inputPricePer1mTokens != null && data.outputPricePer1mTokens != null) {
           const pair: [number, number] = [data.inputPricePer1mTokens, data.outputPricePer1mTokens];
-          this.pricingCache.set(key, pair);
+          this.pricingCache.set(key, { value: pair, fetchedAt: Date.now() });
           return pair;
         }
       }
